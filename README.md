@@ -6,6 +6,11 @@ An agentic AI system demonstrating:
 - Neo4j Knowledge Graph with Cypher queries
 - FastAPI REST endpoint
 
+## Architecture
+
+![Ai Healthcare Agent](docs/architecture.png)
+
+
 ## Quick Start
 
 ### 1. Clone and install
