@@ -1,29 +1,9 @@
 """
-app/main.py
------------
 FastAPI application entry point.
 
-Changes from the original:
-    1. @app.on_event("startup") replaced with lifespan() context manager.
-       The startup decorator is deprecated in FastAPI >= 0.93.
-    2. CORS allowed origins are loaded from the ALLOWED_ORIGINS environment
-       variable rather than hardcoded to "*".
-    3. run_agent() is called via asyncio.to_thread() to avoid blocking
-       the async event loop. Neo4j and SQLite calls are synchronous;
-       running them directly in an async handler blocks all other requests.
-    4. Config is validated at startup so misconfiguration fails fast.
-    5. Neo4j client is closed cleanly on shutdown.
-
-API contract:
-    POST /chat
-        Request:  { "message": "..." }
-        Response: { "answer": "...", "tools_used": [...], "total_turns": N }
-
-    GET /
-        Health check — returns service status.
-
-    GET /health
-        Extended health check — also pings Neo4j.
+Provides chat and health-check endpoints, manages application
+lifespan, validates configuration, and runs synchronous agent
+workloads in a background thread.
 """
 
 import asyncio

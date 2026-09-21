@@ -1,28 +1,10 @@
 """
-app/tools/find_doctor.py
-------------------------
 Neo4j-based doctor discovery tool.
 
-Searches the healthcare Knowledge Graph for doctors by:
-  - Medical condition  (e.g. "Hypertension", "Migraine")
-  - Specialization     (e.g. "Cardiology", "Neurology")
+Searches the healthcare Knowledge Graph by medical condition
+or specialization and returns relevant doctor information.
 
-When searching by condition, also returns related conditions
-so the LLM can provide richer context to the user.
-
-If both condition and specialization are provided, condition
-takes precedence (simpler graph traversal, fewer hops).
-
-Error handling:
-    Neo4j driver errors are caught here. The raw error message
-    is logged but NOT forwarded to the LLM — only a safe message
-    is returned. This prevents internal connection details, stack
-    traces, or file paths from leaking into responses.
-
-Limitation:
-    Case-insensitive matching via toLower() prevents standard
-    Neo4j property index use. Acceptable for a prototype with
-    small data volume.
+Uses safe error handling and supports related-condition lookups.
 """
 
 from pydantic import BaseModel, Field, model_validator

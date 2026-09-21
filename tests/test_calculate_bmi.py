@@ -3,8 +3,7 @@ tests/test_calculate_bmi.py
 ----------------------------
 Unit tests for the calculate_bmi tool.
 
-No external dependencies — this is a pure deterministic function.
-All tests run without network, database, or API access.
+this is a pure deterministic function.
 """
 
 import pytest

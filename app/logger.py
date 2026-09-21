@@ -1,24 +1,6 @@
 """
-app/logger.py
--------------
-Configures application-wide logging with a consistent format.
-
-Each log record includes:
-  - timestamp
-  - level
-  - logger name (module path)
-  - message
-  - optional context fields via the 'extra' dict
-
-Usage:
-    from app.logger import get_logger
-    log = get_logger(__name__)
-    log.info("Tool executed", extra={"tool": "find_doctor", "status": "ok"})
-
-Limitation:
-    This is structured-format logging to stdout, NOT a distributed
-    tracing solution. It does not integrate with Datadog, OpenTelemetry,
-    or any external observability platform.
+Configures application-wide logging with a consistent format,
+including optional contextual fields through the extra parameter.
 """
 
 import logging

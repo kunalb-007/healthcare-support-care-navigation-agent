@@ -4,7 +4,6 @@ tests/test_get_appointment.py
 Unit tests for the get_appointment tool.
 
 Uses a temporary SQLite database via monkeypatching the DB_PATH.
-No external services required.
 """
 
 import os

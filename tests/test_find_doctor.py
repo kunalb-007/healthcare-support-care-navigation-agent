@@ -3,9 +3,8 @@ tests/test_find_doctor.py
 --------------------------
 Unit tests for the find_doctor tool.
 
-Neo4j is mocked throughout — no real database connection required.
-Tests verify argument validation, routing logic, error handling, and
-the shape of returned data.
+Neo4j is mocked
+Tests verify argument validation, routing logic, error handling, and the shape of returned data.
 """
 
 from unittest.mock import MagicMock, patch

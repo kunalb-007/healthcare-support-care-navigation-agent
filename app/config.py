@@ -1,15 +1,8 @@
 """
-app/config.py
--------------
-Centralised configuration loaded from environment variables.
+Centralized application configuration loaded from environment
+variables using Pydantic Settings.
 
-All secrets and environment-specific values are read here.
-This module is the single source of truth for configuration —
-no other module should call os.getenv() directly.
-
-Usage:
-    from app.config import settings
-    print(settings.neo4j_uri)
+Provides a single configuration source for the application.
 """
 
 import os

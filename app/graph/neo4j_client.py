@@ -1,27 +1,9 @@
 """
-app/graph/neo4j_client.py
---------------------------
-Neo4j driver wrapper providing the four Cypher queries used by find_doctor.
+Neo4j driver wrapper providing parameterized Cypher queries
+for doctor discovery and related graph lookups.
 
-Design decisions:
-    - The driver is created lazily (on first use) rather than at module
-      import time. This prevents import-time failures when Neo4j is
-      not yet available (e.g. during unit tests or CI).
-    - Each query method opens and closes a session explicitly.
-    - All queries use parameterised Cypher to prevent injection.
-    - toLower() is used for case-insensitive matching.
-
-Performance note on toLower():
-    Using toLower($param) on a property prevents Neo4j from using a
-    standard index on that property. For a prototype with small data
-    this is acceptable. A production system would use a full-text index
-    (db.index.fulltext) or store a normalised lowercase copy of the
-    property alongside the original.
-
-Error handling:
-    All exceptions from the Neo4j driver bubble up to the caller
-    (find_doctor), which catches them and returns a safe error dict.
-    Raw driver error messages are NOT forwarded to the LLM.
+Uses lazy driver initialization, explicit session management,
+and safe error propagation to the calling tool.
 """
 
 from app.config import settings

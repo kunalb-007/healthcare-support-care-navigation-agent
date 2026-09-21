@@ -10,10 +10,6 @@ Tests verify:
   - Maximum iteration limit
   - LLM failure handling
   - should_continue routing logic
-
-NOTE: These tests verify the agent STRUCTURE and ROUTING behavior.
-      They do not test the quality of LLM responses (non-deterministic).
-      End-to-end quality testing requires a real LLM.
 """
 
 from unittest.mock import MagicMock, patch

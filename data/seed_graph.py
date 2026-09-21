@@ -1,45 +1,8 @@
 """
-data/seed_graph.py
-------------------
-Seed the Neo4j Knowledge Graph with synthetic healthcare data.
+Seeds Neo4j with synthetic healthcare Knowledge Graph data.
 
-Run once after starting Neo4j:
-    python data/seed_graph.py
-
-Safe to re-run: clears all existing nodes and relationships before seeding.
-
-Changes from original:
-    1. Uses settings from app.config rather than os.getenv directly.
-    2. Adds uniqueness constraints before seeding to enforce data integrity.
-    3. Adds composite index on Doctor.name for faster lookups.
-    4. Comments explain the graph model clearly for interview discussion.
-
-Knowledge Graph Schema:
-    Nodes:
-        (:Doctor   {name, experience_years})
-        (:Hospital {name, location})
-        (:Specialization {name})
-        (:Condition {name})
-
-    Relationships:
-        (Doctor)-[:SPECIALIZES_IN]->(Specialization)
-        (Doctor)-[:WORKS_AT]->(Hospital)
-        (Condition)-[:TREATED_BY]->(Specialization)
-        (Condition)-[:RELATED_TO]->(Condition)
-
-    Multi-hop traversal example:
-        User asks about "Hypertension"
-        → (Condition{Hypertension})-[:TREATED_BY]->(Specialization{Cardiology})
-          <-[:SPECIALIZES_IN]-(Doctor{Dr. Sharma})
-          -[:WORKS_AT]->(Hospital{City Hospital})
-
-Note on toLower() and indexes:
-    The Cypher queries use toLower() for case-insensitive matching.
-    Standard Neo4j property indexes do not support toLower() lookups.
-    The uniqueness constraints below ensure data integrity but do NOT
-    speed up case-insensitive queries. For a production system with
-    large datasets, consider a full-text index instead:
-        CREATE FULLTEXT INDEX condition_name FOR (c:Condition) ON EACH [c.name]
+Creates constraints and indexes, defines the graph schema,
+and supports repeatable database seeding.
 """
 
 import os

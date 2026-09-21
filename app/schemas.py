@@ -1,11 +1,6 @@
 """
-app/schemas.py
---------------
-Pydantic models for FastAPI request and response bodies.
-
-These models validate incoming data and define the contract
-between the API client and the agent. They are separate from
-tool-level validation models (defined in each tool module).
+Pydantic models for validating FastAPI request and response
+payloads and defining the API contract.
 """
 
 from pydantic import BaseModel, Field

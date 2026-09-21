@@ -1,19 +1,8 @@
 """
-app/tools/calculate_bmi.py
---------------------------
 Deterministic BMI calculation tool.
 
-IMPORTANT DISCLAIMER:
-    This tool calculates BMI using the standard WHO formula and
-    returns a weight classification category. It is NOT a medical
-    diagnosis tool and should NOT be used for clinical decisions.
-    Users should consult a qualified healthcare professional for
-    personalised medical advice.
-
-Validation:
-    Weight and height must be positive numbers. Invalid inputs
-    return an error dict — no exception is raised — so the LLM
-    can report the issue clearly to the user.
+Validates positive height and weight inputs and returns
+a BMI classification. This is not a medical diagnostic tool.
 """
 
 from pydantic import BaseModel, Field, field_validator

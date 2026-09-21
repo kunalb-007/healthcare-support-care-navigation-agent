@@ -3,9 +3,7 @@ tests/test_api.py
 ------------------
 Integration tests for the FastAPI /chat and /health endpoints.
 
-The agent (run_agent) is mocked so no real LLM or database calls
-are made. Tests verify the HTTP contract: request validation,
-response schema, and error handling.
+The agent (run_agent) is mocked so no real LLM or database calls are made.
 """
 
 import os

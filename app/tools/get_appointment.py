@@ -1,20 +1,8 @@
 """
-app/tools/get_appointment.py
------------------------------
 SQLite-backed appointment lookup tool.
 
-Design decisions:
-    - Opens and closes a new connection per call. SQLite is not
-      intended for high-concurrency production use; this is acceptable
-      for a prototype.
-    - Returns a structured dict on both success and failure — never
-      raises an exception — so the LLM can report the outcome clearly.
-    - Error messages are sanitized: raw exception details (file paths,
-      SQLite internals) are logged but not returned to the caller.
-
-Limitation:
-    SQLite does not support concurrent writes safely. For a production
-    system, replace with PostgreSQL or another server-based RDBMS.
+Returns structured success or error responses and sanitizes
+internal database errors before returning them to the caller.
 """
 
 import re

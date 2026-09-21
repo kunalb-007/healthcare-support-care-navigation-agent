@@ -1,56 +1,11 @@
 """
-app/agent.py
-------------
-LangGraph-based agent orchestration.
+LangGraph-based agent orchestration using a ReAct-style workflow.
 
-This module replaces the previous manual while-loop agent with a
-LangGraph StateGraph. The graph has exactly two node types and one
-conditional edge — the simplest correct implementation of the
-ReAct (Reason + Act) pattern.
+The graph contains an agent node, a ToolNode, and conditional
+routing based on LLM tool calls and the maximum turn limit.
 
-Graph structure:
-    [START] → agent_node
-                  ↓
-            should_continue?  ←── conditional edge
-            /            \\
-        "tools"          END
-           ↓
-        tool_node
-           ↓
-        agent_node  (loop)
-
-State:
-    AgentState holds:
-      - messages:    full conversation history (LangChain messages)
-      - tools_used:  list of {tool, args} dicts for observability
-      - total_turns: number of tool round-trips completed
-      - error:       set when a graph-level error occurs
-
-Nodes:
-    agent_node  — calls the LLM with the current message history.
-                  The LLM decides whether to call a tool or respond.
-    tool_node   — LangGraph's built-in ToolNode executes tool calls
-                  and appends results back to state.messages.
-
-Routing:
-    should_continue() inspects the last message after agent_node runs:
-      - If it contains tool_calls AND we're under MAX_TURNS → "tools"
-      - Otherwise → END
-
-Tools:
-    Tools are registered as LangChain @tool-decorated functions so
-    LangGraph's ToolNode can discover and execute them automatically.
-    Only explicitly registered tools can be called — unknown tool names
-    result in an error message returned to the LLM, not an exception.
-
-Limitations:
-    - Tool calls within one LLM turn are executed SEQUENTIALLY,
-      not in parallel. LangGraph's ToolNode supports parallel execution
-      in newer versions; this is noted as a future improvement.
-    - Each /chat request starts a fresh graph with no memory of prior
-      conversations (stateless per request).
-    - LLM calls do not have a timeout beyond what the underlying HTTP
-      client enforces. See NOTE in agent_node.
+The agent is stateless per request, and synchronous tool calls
+execute sequentially.
 """
 
 import json
