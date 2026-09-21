@@ -1,81 +1,172 @@
+"""
+app/tools/get_appointment.py
+-----------------------------
+SQLite-backed appointment lookup tool.
+
+Design decisions:
+    - Opens and closes a new connection per call. SQLite is not
+      intended for high-concurrency production use; this is acceptable
+      for a prototype.
+    - Returns a structured dict on both success and failure — never
+      raises an exception — so the LLM can report the outcome clearly.
+    - Error messages are sanitized: raw exception details (file paths,
+      SQLite internals) are logged but not returned to the caller.
+
+Limitation:
+    SQLite does not support concurrent writes safely. For a production
+    system, replace with PostgreSQL or another server-based RDBMS.
+"""
+
+import re
 import sqlite3
+from pathlib import Path
+
+from pydantic import BaseModel, Field, field_validator
+
+from app.logger import get_logger
+
+log = get_logger(__name__)
 
 DB_PATH = "appointments.db"
 
+# ------------------------------------------------------------------
+# Appointment ID validation: must match AP + digits, e.g. AP101
+# ------------------------------------------------------------------
+_APPOINTMENT_ID_PATTERN = re.compile(r"^AP\d+$", re.IGNORECASE)
+
+
+class AppointmentInput(BaseModel):
+    """Validates the appointment_id argument before querying the DB."""
+
+    appointment_id: str = Field(
+        ...,
+        min_length=2,
+        max_length=20,
+        description="Appointment ID in the format AP followed by digits, e.g. AP101.",
+    )
+
+    @field_validator("appointment_id", mode="before")
+    @classmethod
+    def normalise_and_validate(cls, v: str) -> str:
+        """Strip whitespace, uppercase, and validate format."""
+        if not isinstance(v, str):
+            raise ValueError("Appointment ID must be a string.")
+        v = v.strip().upper()
+        if not _APPOINTMENT_ID_PATTERN.match(v):
+            raise ValueError(
+                f"'{v}' is not a valid appointment ID. "
+                "Expected format: AP followed by digits, e.g. AP101."
+            )
+        return v
+
+
+# ------------------------------------------------------------------
+# Database initialisation
+# ------------------------------------------------------------------
 
 def init_appointments_db() -> None:
     """
     Create the appointments table and seed it with sample data
     if it does not already exist.
-    Called once at FastAPI startup.
+
+    Called once at FastAPI startup via the lifespan context manager.
+    Safe to call multiple times — INSERT OR IGNORE prevents duplicates.
     """
-    conn   = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
-           CREATE TABLE IF NOT EXISTS appointments (
-                  appointment_id TEXT PRIMARY KEY,
-                  patient_name   TEXT NOT NULL,
-                  doctor_name    TEXT NOT NULL,
-                  specialization TEXT NOT NULL,
-                  date           TEXT NOT NULL,
-                  time           TEXT NOT NULL,
-                  status         TEXT NOT NULL,
-                  notes          TEXT
-            )
-    """)
+                   CREATE TABLE IF NOT EXISTS appointments (
+                                                               appointment_id TEXT PRIMARY KEY,
+                                                               patient_name   TEXT NOT NULL,
+                                                               doctor_name    TEXT NOT NULL,
+                                                               specialization TEXT NOT NULL,
+                                                               date           TEXT NOT NULL,
+                                                               time           TEXT NOT NULL,
+                                                               status         TEXT NOT NULL,
+                                                               notes          TEXT
+                   )
+                   """)
 
-    # Sample appointments — INSERT OR IGNORE so re-running startup is safe
     sample_appointments = [
-        ("AP101", "Rahul Mehta",   "Dr. Sharma", "Cardiology",      "2026-09-20", "10:00 AM", "confirmed",  "Follow-up for blood pressure check"),
-        ("AP102", "Priya Singh",   "Dr. Patel",  "Cardiology",      "2026-09-22", "11:30 AM", "pending",    "Initial consultation"),
-        ("AP103", "Arun Kumar",    "Dr. Mehta",  "Neurology",       "2026-09-18", "09:00 AM", "cancelled",  "Cancelled by patient"),
-        ("AP104", "Sunita Verma",  "Dr. Rao",    "Orthopedics",     "2026-09-25", "02:00 PM", "confirmed",  "Knee pain evaluation"),
-        ("AP105", "Vikram Nair",   "Dr. Sharma", "Cardiology",      "2026-09-28", "03:30 PM", "confirmed",  "Routine cardiac checkup"),
-        ("AP106", "Anjali Desai",  "Dr. Mehta",  "Neurology",       "2026-09-30", "10:00 AM", "pending",    "Migraine assessment"),
+        ("AP101", "Rahul Mehta",  "Dr. Sharma", "Cardiology",    "2026-09-20", "10:00 AM", "confirmed", "Follow-up for blood pressure check"),
+        ("AP102", "Priya Singh",  "Dr. Patel",  "Cardiology",    "2026-09-22", "11:30 AM", "pending",   "Initial consultation"),
+        ("AP103", "Arun Kumar",   "Dr. Mehta",  "Neurology",     "2026-09-18", "09:00 AM", "cancelled", "Cancelled by patient"),
+        ("AP104", "Sunita Verma", "Dr. Rao",    "Orthopedics",   "2026-09-25", "02:00 PM", "confirmed", "Knee pain evaluation"),
+        ("AP105", "Vikram Nair",  "Dr. Sharma", "Cardiology",    "2026-09-28", "03:30 PM", "confirmed", "Routine cardiac checkup"),
+        ("AP106", "Anjali Desai", "Dr. Mehta",  "Neurology",     "2026-09-30", "10:00 AM", "pending",   "Migraine assessment"),
     ]
 
     cursor.executemany(
         "INSERT OR IGNORE INTO appointments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        sample_appointments
+        sample_appointments,
     )
 
     conn.commit()
     conn.close()
+    log.info("Appointments database initialised.", extra={"db_path": DB_PATH})
 
+
+# ------------------------------------------------------------------
+# Tool function
+# ------------------------------------------------------------------
 
 def get_appointment(appointment_id: str) -> dict:
     """
-    Look up an appointment by its ID.
+    Look up an appointment by its unique ID.
 
-    Returns full appointment details: patient name, doctor, specialization,
-    date, time, status, and any notes.
+    Args:
+        appointment_id: Appointment ID string, e.g. 'AP101'.
+                        Case-insensitive; leading/trailing whitespace stripped.
 
-    Returns a 'found: False' payload when the ID does not exist rather than
-    raising an exception, so the LLM can report 'not found' gracefully.
+    Returns:
+        dict with full appointment details on success, or
+        dict with 'found: False' when the record does not exist, or
+        dict with 'error' key when a database error occurs.
     """
+    # Validate the input before touching the database
     try:
-        conn             = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row          # access columns by name
-        cursor           = conn.cursor()
+        validated = AppointmentInput(appointment_id=appointment_id)
+    except Exception as e:
+        return {
+            "error": _extract_validation_message(e),
+            "appointment_id": appointment_id,
+        }
+
+    normalised_id = validated.appointment_id  # already uppercased
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
 
         cursor.execute(
             "SELECT * FROM appointments WHERE appointment_id = ?",
-            (appointment_id.upper().strip(),)  # normalise casing
+            (normalised_id,),
         )
         row = cursor.fetchone()
         conn.close()
 
         if row is None:
+            log.info(
+                "Appointment not found.",
+                extra={"appointment_id": normalised_id},
+            )
             return {
                 "found": False,
-                "appointment_id": appointment_id,
-                "message":  f"No appointment found with ID '{appointment_id}'. "
-                            "Please check the ID and try again."
+                "appointment_id": normalised_id,
+                "message": (
+                    f"No appointment found with ID '{normalised_id}'. "
+                    "Please check the ID and try again."
+                ),
             }
 
+        log.info(
+            "Appointment retrieved.",
+            extra={"appointment_id": normalised_id, "status": row["status"]},
+        )
         return {
-            "found":          True,
+            "found": True,
             "appointment_id": row["appointment_id"],
             "patient_name":   row["patient_name"],
             "doctor_name":    row["doctor_name"],
@@ -83,8 +174,25 @@ def get_appointment(appointment_id: str) -> dict:
             "date":           row["date"],
             "time":           row["time"],
             "status":         row["status"],
-            "notes":          row["notes"]
+            "notes":          row["notes"],
         }
 
-    except Exception as e:
-        return {"error": f"Appointment lookup failed: {str(e)}"}
+    except sqlite3.Error as e:
+        # Log the full error for debugging; return a safe message to caller.
+        log.error(
+            "SQLite error during appointment lookup.",
+            extra={"appointment_id": normalised_id, "error": str(e)},
+        )
+        return {
+            "error": "Appointment lookup is temporarily unavailable. Please try again.",
+            "appointment_id": normalised_id,
+        }
+
+
+def _extract_validation_message(exc: Exception) -> str:
+    """Extract a clean message from a Pydantic ValidationError."""
+    try:
+        errors = exc.errors()
+        return "; ".join(e.get("msg", "Invalid value") for e in errors)
+    except Exception:
+        return "Invalid appointment ID format."

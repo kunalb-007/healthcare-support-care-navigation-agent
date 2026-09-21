@@ -1,40 +1,141 @@
+"""
+app/tools/calculate_bmi.py
+--------------------------
+Deterministic BMI calculation tool.
+
+IMPORTANT DISCLAIMER:
+    This tool calculates BMI using the standard WHO formula and
+    returns a weight classification category. It is NOT a medical
+    diagnosis tool and should NOT be used for clinical decisions.
+    Users should consult a qualified healthcare professional for
+    personalised medical advice.
+
+Validation:
+    Weight and height must be positive numbers. Invalid inputs
+    return an error dict — no exception is raised — so the LLM
+    can report the issue clearly to the user.
+"""
+
+from pydantic import BaseModel, Field, field_validator
+
+
+# ------------------------------------------------------------------
+# Input validation model
+# ------------------------------------------------------------------
+
+class BMIInput(BaseModel):
+    """
+    Validates the arguments the LLM passes to calculate_bmi.
+
+    Pydantic enforces types and value constraints before the
+    calculation runs, preventing silent errors from bad LLM outputs.
+    """
+    weight_kg: float = Field(
+        ...,
+        gt=0,
+        description="Body weight in kilograms. Must be a positive number.",
+    )
+    height_cm: float = Field(
+        ...,
+        gt=0,
+        description="Height in centimetres. Must be a positive number.",
+    )
+
+    @field_validator("weight_kg", "height_cm", mode="before")
+    @classmethod
+    def must_be_finite(cls, v: float) -> float:
+        """Reject infinity and NaN, which pass the gt=0 check."""
+        import math
+        if not math.isfinite(float(v)):
+            raise ValueError("Value must be a finite number.")
+        return v
+
+
+# ------------------------------------------------------------------
+# Tool function
+# ------------------------------------------------------------------
+
 def calculate_bmi(weight_kg: float, height_cm: float) -> dict:
     """
-    Calculate BMI given weight in kilograms and height in centimetres.
-    Formula : BMI = weight_kg / (height_m ** 2)
-    Returns BMI value rounded to 2 decimal places and the WHO category.
+    Calculate BMI and return the WHO weight classification.
+
+    Formula: BMI = weight_kg / (height_m ** 2)
+
+    Args:
+        weight_kg: Body weight in kilograms (must be > 0).
+        height_cm: Height in centimetres (must be > 0).
+
+    Returns:
+        dict with keys:
+            bmi        — rounded to 2 decimal places
+            category   — WHO classification string
+            advice     — brief guidance (not a medical diagnosis)
+            weight_kg  — echoed input
+            height_cm  — echoed input
+        On validation failure, returns:
+            error      — human-readable error message
     """
-    if weight_kg <= 0 or height_cm <= 0:
-        return {
-            "error": "Weight and height must be positive values.",
-            "weight_kg": weight_kg,
-            "height_cm": height_cm
-        }
-
+    # Validate inputs using the Pydantic model
     try:
-        height_m = height_cm / 100.0
-        bmi = round(weight_kg / (height_m ** 2), 2)
-
-        if bmi < 18.5:
-            category = "Underweight"
-            advice = "Consider consulting a General Medicine doctor about healthy weight gain."
-        elif bmi < 25.0:
-            category = "Normal weight"
-            advice = "You are within the healthy weight range. Maintain a balanced diet and regular exercise."
-        elif bmi < 30.0:
-            category = "Overweight"
-            advice = "Consider consulting a General Medicine doctor about a healthy weight management plan."
-        else:
-            category = "Obese"
-            advice = "It is recommended to consult a doctor for personalised weight management guidance."
-
+        validated = BMIInput(weight_kg=weight_kg, height_cm=height_cm)
+    except Exception as e:
+        # Return a structured error dict; the LLM surfaces this to the user.
+        # We do NOT expose the raw Pydantic error object.
         return {
-            "bmi": bmi,
-            "category": category,
-            "advice": advice,
+            "error": f"Invalid inputs: {_extract_validation_message(e)}",
             "weight_kg": weight_kg,
-            "height_cm": height_cm
+            "height_cm": height_cm,
         }
 
-    except Exception as e:
-        return {"error": f"BMI calculation failed: {str(e)}"}
+    height_m = validated.height_cm / 100.0
+    bmi = round(validated.weight_kg / (height_m ** 2), 2)
+
+    if bmi < 18.5:
+        category = "Underweight"
+        advice = (
+            "Your BMI suggests you may be underweight. "
+            "Consider consulting a General Medicine doctor about healthy weight gain."
+        )
+    elif bmi < 25.0:
+        category = "Normal weight"
+        advice = (
+            "Your BMI is within the healthy range. "
+            "Maintain a balanced diet and regular physical activity."
+        )
+    elif bmi < 30.0:
+        category = "Overweight"
+        advice = (
+            "Your BMI suggests you may be overweight. "
+            "Consider consulting a General Medicine doctor about weight management."
+        )
+    else:
+        category = "Obese"
+        advice = (
+            "Your BMI suggests obesity. "
+            "It is recommended to consult a doctor for personalised guidance."
+        )
+
+    return {
+        "bmi": bmi,
+        "category": category,
+        "advice": advice,
+        "weight_kg": validated.weight_kg,
+        "height_cm": validated.height_cm,
+        "disclaimer": (
+            "This BMI result is for general informational purposes only "
+            "and does not constitute medical advice or diagnosis."
+        ),
+    }
+
+
+def _extract_validation_message(exc: Exception) -> str:
+    """
+    Extract a clean user-facing message from a Pydantic ValidationError.
+    Avoids exposing raw internal error representations.
+    """
+    try:
+        errors = exc.errors()
+        messages = [e.get("msg", "Invalid value") for e in errors]
+        return "; ".join(messages)
+    except Exception:
+        return "weight and height must be positive numbers."

@@ -1,38 +1,56 @@
+"""
+app/schemas.py
+--------------
+Pydantic models for FastAPI request and response bodies.
+
+These models validate incoming data and define the contract
+between the API client and the agent. They are separate from
+tool-level validation models (defined in each tool module).
+"""
+
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any
 
 
 class ChatRequest(BaseModel):
     """
     Incoming request body for POST /chat.
-    `message` is the raw natural-language query from the user.
+
+    'message' is the raw natural-language query from the user.
     """
     message: str = Field(
         ...,
         min_length=1,
         max_length=1000,
-        description="Natural language query from the user.",
-        examples=["Which doctors treat hypertension?"]
+        description="Natural language healthcare query from the user.",
+        examples=["Which doctors treat hypertension?"],
     )
 
 
 class ToolCall(BaseModel):
     """
     Records one tool invocation that occurred during the agent loop.
-    Returned in the response for observability / debugging.
+    Returned in the response for observability and interview demonstration.
     """
-    tool: str
-    args: dict
+    tool: str = Field(..., description="Name of the tool that was called.")
+    args: dict[str, Any] = Field(..., description="Arguments passed to the tool.")
 
 
 class ChatResponse(BaseModel):
     """
     Response body returned by POST /chat.
 
-    answer      — the LLM's final synthesised response.
-    tools_used  — list of tools called and the arguments used.
-    total_turns — how many tool round-trips occurred (0 = direct answer).
+    Fields:
+        answer      — LLM's final synthesised response.
+        tools_used  — ordered list of tools called with their arguments.
+        total_turns — number of tool round-trips (0 means direct answer).
     """
-    answer:  str
-    tools_used:  List[ToolCall]
-    total_turns: int
+    answer: str = Field(..., description="LLM's final response to the user.")
+    tools_used: list[ToolCall] = Field(
+        default_factory=list,
+        description="Tools called during this request, in execution order.",
+    )
+    total_turns: int = Field(
+        ...,
+        description="Number of agent→tool→agent round-trips. 0 = direct response.",
+    )
