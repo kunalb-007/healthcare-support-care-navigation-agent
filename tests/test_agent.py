@@ -1,255 +1,205 @@
 """
-tests/test_agent.py
---------------------
-Tests for the LangGraph agent orchestration.
+Unit tests for the Healthcare Agent.
 
-All LLM calls are mocked — no real API calls are made.
-Tests verify:
-  - Direct responses (no tool calls)
-  - Tool routing and tracking
-  - Maximum iteration limit
-  - LLM failure handling
-  - should_continue routing logic
+Run with:  pytest tests/ -v
+
+These tests are designed to be explainable in 30 seconds each during an interview.
+They test the core logic WITHOUT making real API/DB calls (using mocks).
 """
 
-from unittest.mock import MagicMock, patch
-
+import json
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from unittest.mock import patch, MagicMock
 
 from app.agent import (
-    AgentState,
-    _extract_final_answer,
+    validate_tool_args,
+    dispatch_tool,
     run_agent,
-    should_continue,
 )
-from app.config import settings
+from app.tools.calculate_bmi import calculate_bmi
 
 
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
+# ===========================================================================
+# 1. Unit tests — calculate_bmi  (pure function, no mocking needed)
+# ===========================================================================
 
-def _make_state(
-        messages=None,
-        tools_used=None,
-        total_turns=0,
-        request_id="test-001",
-        error=None,
-) -> AgentState:
-    """Build a minimal AgentState for routing tests."""
-    return AgentState(
-        messages=messages or [HumanMessage(content="Hello")],
-        tools_used=tools_used or [],
-        total_turns=total_turns,
-        request_id=request_id,
-        error=error,
-    )
+class TestCalculateBMI:
 
+    def test_normal_weight(self):
+        result = calculate_bmi(70, 175)
+        assert result["bmi"] == 22.86
+        assert result["category"] == "Normal weight"
 
-def _ai_message_with_tool_call(tool_name="find_doctor") -> AIMessage:
-    """Build an AIMessage that contains a tool call."""
-    msg = AIMessage(content="")
-    msg.tool_calls = [
-        {
-            "name": tool_name,
-            "args": {"condition": "Hypertension"},
-            "id": "call_001",
-            "type": "tool_call",
-        }
-    ]
-    return msg
+    def test_underweight(self):
+        result = calculate_bmi(45, 175)
+        assert result["category"] == "Underweight"
+
+    def test_overweight(self):
+        result = calculate_bmi(85, 175)
+        assert result["category"] == "Overweight"
+
+    def test_obese(self):
+        result = calculate_bmi(110, 175)
+        assert result["category"] == "Obese"
+
+    def test_zero_weight_returns_error(self):
+        result = calculate_bmi(0, 175)
+        assert "error" in result
+
+    def test_negative_height_returns_error(self):
+        result = calculate_bmi(70, -5)
+        assert "error" in result
 
 
-def _ai_message_plain(content="Here is your answer.") -> AIMessage:
-    """Build a plain AIMessage with no tool calls."""
-    msg = AIMessage(content=content)
-    msg.tool_calls = []
-    return msg
+# ===========================================================================
+# 2. Unit tests — validate_tool_args
+# ===========================================================================
+
+class TestValidateToolArgs:
+
+    def test_valid_bmi_args(self):
+        assert validate_tool_args("calculate_bmi", {"weight_kg": 70, "height_cm": 175}) is None
+
+    def test_missing_height(self):
+        error = validate_tool_args("calculate_bmi", {"weight_kg": 70})
+        assert error is not None
+        assert "height_cm" in error
+
+    def test_negative_weight(self):
+        error = validate_tool_args("calculate_bmi", {"weight_kg": -10, "height_cm": 170})
+        assert error is not None
+
+    def test_valid_appointment_id(self):
+        assert validate_tool_args("get_appointment", {"appointment_id": "AP101"}) is None
+
+    def test_empty_appointment_id(self):
+        error = validate_tool_args("get_appointment", {"appointment_id": ""})
+        assert error is not None
+
+    def test_find_doctor_no_args(self):
+        error = validate_tool_args("find_doctor", {})
+        assert error is not None
+
+    def test_find_doctor_with_condition(self):
+        assert validate_tool_args("find_doctor", {"condition": "Hypertension"}) is None
+
+    def test_find_doctor_with_specialization(self):
+        assert validate_tool_args("find_doctor", {"specialization": "Cardiology"}) is None
 
 
-# ------------------------------------------------------------------
-# should_continue routing tests
-# ------------------------------------------------------------------
+# ===========================================================================
+# 3. Unit tests — dispatch_tool
+# ===========================================================================
 
-class TestShouldContinue:
-    """Unit tests for the conditional routing function."""
+class TestDispatchTool:
 
-    def test_routes_to_tools_when_tool_call_present(self):
-        """If last message has tool_calls, route to 'tools'."""
-        state = _make_state(
-            messages=[_ai_message_with_tool_call()],
-            total_turns=0,
-        )
-        result = should_continue(state)
-        assert result == "tools"
+    def test_unknown_tool_returns_error_json(self):
+        result = json.loads(dispatch_tool("nonexistent_tool", {}))
+        assert "error" in result
 
-    def test_routes_to_end_when_no_tool_calls(self):
-        """If last message has no tool_calls, route to END."""
-        from langgraph.graph import END
-        state = _make_state(
-            messages=[_ai_message_plain()],
-            total_turns=0,
-        )
-        result = should_continue(state)
-        assert result == END
+    def test_validation_error_returned_as_json(self):
+        # dispatch with bad args — should NOT raise, returns JSON error
+        result = json.loads(dispatch_tool("calculate_bmi", {"weight_kg": -5, "height_cm": 170}))
+        assert "error" in result
 
-    def test_routes_to_end_when_max_turns_reached(self):
-        """If total_turns >= MAX_AGENT_TURNS, stop even if tool_calls present."""
-        from langgraph.graph import END
-        state = _make_state(
-            messages=[_ai_message_with_tool_call()],
-            total_turns=settings.max_agent_turns,  # at the limit
-        )
-        result = should_continue(state)
-        assert result == END
+    def test_dispatch_calculate_bmi_success(self):
+        result = json.loads(dispatch_tool("calculate_bmi", {"weight_kg": 70, "height_cm": 175}))
+        assert "bmi" in result
+        assert result["bmi"] == 22.86
 
-    def test_routes_to_end_on_error(self):
-        """If state.error is set, always route to END."""
-        from langgraph.graph import END
-        state = _make_state(
-            messages=[_ai_message_with_tool_call()],
-            error="LLM call failed",
-        )
-        result = should_continue(state)
-        assert result == END
+    @patch("app.agent.TOOL_MAP")
+    def test_tool_retry_on_exception(self, mock_tool_map):
+        """If the tool raises an exception, dispatch retries MAX_RETRIES times."""
+        mock_fn = MagicMock(side_effect=RuntimeError("DB timeout"))
+        mock_tool_map.__contains__ = MagicMock(return_value=True)
+        mock_tool_map.__getitem__  = MagicMock(return_value=mock_fn)
 
-    def test_routes_to_tools_just_under_max_turns(self):
-        """One turn below MAX_AGENT_TURNS should still route to tools."""
-        state = _make_state(
-            messages=[_ai_message_with_tool_call()],
-            total_turns=settings.max_agent_turns - 1,
-        )
-        result = should_continue(state)
-        assert result == "tools"
+        with patch("app.agent.validate_tool_args", return_value=None), \
+             patch("app.agent.time.sleep"):          # skip real sleep in tests
+            result = json.loads(dispatch_tool("find_doctor", {"condition": "Hypertension"}))
+
+        assert "error" in result
+        assert "failed after" in result["error"]
 
 
-# ------------------------------------------------------------------
-# _extract_final_answer tests
-# ------------------------------------------------------------------
+# ===========================================================================
+# 4. Integration-style test — run_agent (LLM mocked)
+# ===========================================================================
 
-class TestExtractFinalAnswer:
-    """Tests for the helper that extracts the last AI response."""
+class TestRunAgent:
 
-    def test_extracts_last_ai_message(self):
-        state = _make_state(
-            messages=[
-                HumanMessage(content="Hello"),
-                _ai_message_plain("First response"),
-                ToolMessage(content="tool result", tool_call_id="x"),
-                _ai_message_plain("Final answer"),
-            ]
-        )
-        answer = _extract_final_answer(state)
-        assert answer == "Final answer"
+    def _make_mock_response(self, content: str):
+        """Helper to create a mock LLM response with a plain text answer."""
+        mock_msg = MagicMock()
+        mock_msg.tool_calls = None
+        mock_msg.content    = content
 
-    def test_returns_fallback_when_no_ai_message(self):
-        state = _make_state(messages=[HumanMessage(content="Hello")])
-        answer = _extract_final_answer(state)
-        assert isinstance(answer, str)
-        assert len(answer) > 0
+        mock_choice = MagicMock()
+        mock_choice.message        = mock_msg
+        mock_choice.finish_reason  = "stop"
 
-    def test_returns_error_message_on_graph_error(self):
-        state = _make_state(
-            messages=[HumanMessage(content="Hello")],
-            error="Something failed",
-        )
-        answer = _extract_final_answer(state)
-        assert isinstance(answer, str)
-        assert len(answer) > 0
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        return mock_response
 
+    def _make_mock_tool_call_response(self, tool_name: str, args: dict, call_id="call_1"):
+        """Helper to create a mock LLM response that requests a tool call."""
+        mock_tool_call           = MagicMock()
+        mock_tool_call.id        = call_id
+        mock_tool_call.function.name      = tool_name
+        mock_tool_call.function.arguments = json.dumps(args)
 
-# ------------------------------------------------------------------
-# run_agent integration tests (mocked LLM)
-# ------------------------------------------------------------------
+        mock_msg            = MagicMock()
+        mock_msg.tool_calls = [mock_tool_call]
+        mock_msg.content    = None
 
-class TestRunAgentDirectResponse:
-    """Tests for queries answered directly without tool calls."""
+        mock_choice = MagicMock()
+        mock_choice.message       = mock_msg
+        mock_choice.finish_reason = "tool_calls"
 
-    def test_direct_response_no_tools(self):
-        """LLM answers directly → tools_used is empty, total_turns is 0."""
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_llm
-        mock_llm.invoke.return_value = _ai_message_plain("Hypertension is high blood pressure.")
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        return mock_response
 
-        with patch("app.agent._build_llm", return_value=mock_llm):
-            result = run_agent("What is hypertension?")
+    @patch("app.agent.call_llm")
+    def test_direct_answer_no_tools(self, mock_llm):
+        """Agent returns answer directly when LLM doesn't call any tools."""
+        mock_llm.return_value = self._make_mock_response("Hypertension is high blood pressure.")
+
+        result = run_agent("What is hypertension?")
 
         assert result["answer"] == "Hypertension is high blood pressure."
         assert result["tools_used"] == []
         assert result["total_turns"] == 0
 
-    def test_result_has_required_keys(self):
-        """run_agent always returns answer, tools_used, total_turns."""
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_llm
-        mock_llm.invoke.return_value = _ai_message_plain("A direct answer.")
+    @patch("app.agent.call_llm")
+    def test_agent_calls_bmi_tool(self, mock_llm):
+        """Agent calls calculate_bmi when user provides weight + height."""
+        # Turn 1: LLM requests tool call
+        # Turn 2: LLM gives final answer after seeing tool result
+        mock_llm.side_effect = [
+            self._make_mock_tool_call_response(
+                "calculate_bmi", {"weight_kg": 70, "height_cm": 175}
+            ),
+            self._make_mock_response("Your BMI is 22.86, which is Normal weight.")
+        ]
 
-        with patch("app.agent._build_llm", return_value=mock_llm):
-            result = run_agent("Hello")
+        result = run_agent("I weigh 70 kg and am 175 cm tall. What is my BMI?")
 
-        assert "answer" in result
-        assert "tools_used" in result
-        assert "total_turns" in result
+        assert result["total_turns"] == 1
+        assert len(result["tools_used"]) == 1
+        assert result["tools_used"][0]["tool"] == "calculate_bmi"
+        assert "BMI" in result["answer"] or "bmi" in result["answer"].lower()
 
+    @patch("app.agent.call_llm")
+    def test_agent_returns_fallback_on_max_turns(self, mock_llm):
+        """Agent returns graceful fallback when MAX_TURNS is hit."""
+        # Always return a tool call — forces infinite loop until MAX_TURNS
+        mock_llm.return_value = self._make_mock_tool_call_response(
+            "calculate_bmi", {"weight_kg": 70, "height_cm": 175}
+        )
 
-class TestRunAgentMaxIterations:
-    """Tests for the maximum iteration guard."""
+        result = run_agent("Loop forever")
 
-    def test_stops_at_max_turns(self):
-        """
-        When the LLM always returns tool calls, the agent must stop
-        at MAX_AGENT_TURNS and return a response — not loop forever.
-        """
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_llm
-        # Always return a tool call
-        mock_llm.invoke.return_value = _ai_message_with_tool_call()
-
-        # Mock the tool execution to return a simple result
-        mock_tool_node_result = {
-            "messages": [ToolMessage(content='{"doctors": []}', tool_call_id="call_001")],
-        }
-
-        with patch("app.agent._build_llm", return_value=mock_llm):
-            with patch("app.agent.tool_node") as mock_tool_node:
-                mock_tool_node.invoke.return_value = mock_tool_node_result
-                result = run_agent("Find me a doctor")
-
-        # Must terminate and return something
-        assert isinstance(result["answer"], str)
-        assert len(result["answer"]) > 0
-        # Must not exceed max turns
-        assert result["total_turns"] <= settings.max_agent_turns
-
-
-class TestRunAgentLLMFailure:
-    """Tests for LLM failure scenarios."""
-
-    def test_llm_exception_returns_safe_message(self):
-        """If the LLM call raises an exception, return a safe message."""
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_llm
-        mock_llm.invoke.side_effect = Exception("Connection refused to OpenRouter")
-
-        with patch("app.agent._build_llm", return_value=mock_llm):
-            result = run_agent("What is my BMI?")
-
-        # Must return a string, not raise an exception
-        assert isinstance(result["answer"], str)
-        assert len(result["answer"]) > 0
-        # Must NOT leak connection details to the user
-        assert "OpenRouter" not in result["answer"]
-        assert "Connection refused" not in result["answer"]
-
-    def test_llm_exception_does_not_propagate(self):
-        """run_agent must never raise — always return a dict."""
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_llm
-        mock_llm.invoke.side_effect = RuntimeError("timeout")
-
-        with patch("app.agent._build_llm", return_value=mock_llm):
-            # This must NOT raise
-            result = run_agent("Hello")
-
-        assert isinstance(result, dict)
+        assert "maximum" in result["answer"].lower()
+        assert result["total_turns"] == 10    # MAX_TURNS

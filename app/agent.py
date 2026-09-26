@@ -1,25 +1,57 @@
 """
-LangGraph-based agent orchestration using a ReAct-style workflow.
+app/agent.py
+------------
+LangGraph-based agent orchestration.
 
-The graph contains an agent node, a ToolNode, and conditional
-routing based on LLM tool calls and the maximum turn limit.
+Graph structure:
+    User message
+         |
+    check_input_scope()   <-- guardrail (runs before graph)
+         |
+    [START] -> agent_node
+                   |
+             should_continue?
+             /             \
+         "tools"            END
+            |
+         tool_node
+            |
+         agent_node  (loop)
 
-The agent is stateless per request, and synchronous tool calls
-execute sequentially.
+Guardrail:
+    A simple scope check runs before the LangGraph graph is invoked.
+    It rejects requests that are clearly outside healthcare navigation
+    (e.g. asking for a diagnosis, prescription, or off-topic queries).
+    This is NOT a sophisticated safety framework — it is a first-pass
+    filter to keep the agent focused and to fail fast on unsupported requests.
+
+State (AgentState):
+    messages:    full conversation history using add_messages reducer
+    total_turns: number of tool round-trips completed
+    request_id:  short UUID for correlating log lines per request
+    error:       set on LLM failure; causes routing to END immediately
+
+Observability (what we log):
+    - Request start with request_id
+    - LLM call latency per turn
+    - Tool name being executed
+    - Errors with sanitized messages
+    - Request completion with total_turns and total latency
+
+Limitations:
+    - Stateless: each /chat request starts a fresh graph with no
+      memory of prior conversations.
+    - Sequential tool execution: multiple tool calls in one LLM
+      turn run one after another, not in parallel.
+    - Guardrail is keyword/heuristic-based, not a trained classifier.
+      Adversarial inputs may bypass it.
 """
 
-import json
 import time
 import uuid
 from typing import Annotated, Any
 
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool as lc_tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
@@ -35,62 +67,143 @@ from app.tools.get_appointment import get_appointment as _get_appointment
 
 log = get_logger(__name__)
 
+
 # ------------------------------------------------------------------
 # System prompt
+#
+# Explicitly restricts the agent to healthcare navigation.
+# The LLM will refuse diagnosis/treatment questions based on this.
+# Combined with the input guardrail for defence in depth.
 # ------------------------------------------------------------------
-SYSTEM_PROMPT = """You are a helpful, professional healthcare support assistant.
-
-You help users with:
+SYSTEM_PROMPT = """You are a healthcare navigation assistant. You help users with:
 - Finding doctors and specialists for medical conditions
 - Checking appointment status and details
 - Calculating and interpreting BMI
 
-Rules:
-1. ALWAYS use the find_doctor tool when asked about doctors, specialists,
-   or which doctor treats a specific condition. Do not guess doctor names.
-2. ALWAYS use get_appointment when the user provides an appointment ID.
-3. ALWAYS use calculate_bmi when the user provides weight and height values.
-4. You may answer general healthcare knowledge questions directly (e.g.
-   "What is hypertension?") without calling a tool.
-5. Do not make up medical diagnoses or treatment recommendations.
-6. Be clear, concise, and empathetic.
-7. If a tool returns an error, explain the situation clearly and suggest
-   what the user can try next.
+You are NOT a doctor. You do NOT:
+- Diagnose medical conditions
+- Recommend specific treatments or medications
+- Interpret medical test results
+- Provide emergency medical advice
 
-IMPORTANT: The BMI calculator and doctor search provide general information
-only. They do not constitute medical advice or diagnosis. Always remind users
-to consult a qualified healthcare professional for personalised guidance.
+If a user asks for a diagnosis, treatment recommendation, or emergency help,
+politely decline and direct them to consult a qualified healthcare professional
+or call emergency services if urgent.
+
+Rules:
+1. Use find_doctor when asked about which doctor or specialist to see.
+2. Use get_appointment when the user provides an appointment ID (e.g. AP101).
+3. Use calculate_bmi when the user provides weight in kg and height in cm.
+4. Answer general healthcare knowledge questions (e.g. "What is hypertension?")
+   directly without a tool call.
+5. If a tool returns an error, explain clearly and suggest next steps.
+
+Always remind users that this system provides navigation assistance only —
+not medical advice. Encourage consulting a qualified healthcare professional.
 """
 
+
 # ------------------------------------------------------------------
-# LangChain @tool wrappers
+# Guardrail
 #
-# LangGraph's ToolNode discovers tools from their function signature
-# and docstring. The docstring is the critical part — the LLM reads
-# it to decide WHEN to call each tool.
+# Runs BEFORE the LangGraph graph is invoked.
+# Purpose: fail fast on clearly out-of-scope or unsupported requests.
+#
+# This is intentionally simple — keyword matching plus length checks.
+# It is not a trained safety classifier. Its job is to:
+#   1. Reject requests asking for diagnosis or prescriptions
+#   2. Reject requests that are clearly unrelated to healthcare
+#   3. Reject suspiciously short or nonsensical inputs
+#
+# The system prompt provides a second layer inside the LLM itself.
+# ------------------------------------------------------------------
+
+# Keywords that suggest the user wants a diagnosis or treatment recommendation
+_DIAGNOSIS_KEYWORDS = [
+    "diagnose", "diagnosis", "prescribe", "prescription",
+    "what disease do i have", "what is wrong with me",
+    "do i have", "am i sick", "cure me", "treat me",
+    "what medication", "which medicine", "what drug should i take",
+]
+
+# Keywords for requests clearly outside healthcare scope
+_OFF_TOPIC_KEYWORDS = [
+    "write code", "write an essay", "generate image", "play a game",
+    "stock price", "weather", "recipe", "translate",
+    "legal advice", "legal question",
+]
+
+
+def check_input_scope(message: str) -> str | None:
+    """
+    Basic scope check before passing the message to the agent.
+
+    Returns:
+        None   — if the message is acceptable, proceed to the graph.
+        str    — a rejection reason string; run_agent returns this
+                 directly without invoking the graph.
+
+    Checks (in order):
+        1. Minimum meaningful length (already enforced by Pydantic min_length=1,
+           but we reject single-character or whitespace-only inputs here)
+        2. Diagnosis / prescription requests
+        3. Clearly off-topic requests
+    """
+    stripped = message.strip()
+
+    # Reject trivially short inputs
+    if len(stripped) < 3:
+        return (
+            "Your message is too short for me to understand. "
+            "Please describe your healthcare question in more detail."
+        )
+
+    lowered = stripped.lower()
+
+    # Reject diagnosis and prescription requests
+    if any(kw in lowered for kw in _DIAGNOSIS_KEYWORDS):
+        return (
+            "I'm a healthcare navigation assistant — I can help you find the right "
+            "doctor or specialist, but I cannot diagnose conditions or recommend "
+            "medications. Please consult a qualified healthcare professional for "
+            "diagnosis and treatment advice."
+        )
+
+    # Reject clearly off-topic requests
+    if any(kw in lowered for kw in _OFF_TOPIC_KEYWORDS):
+        return (
+            "I'm a healthcare navigation assistant. I can help you find doctors, "
+            "check appointment details, or calculate BMI. "
+            "Your question appears to be outside that scope."
+        )
+
+    return None  # message is acceptable
+
+
+# ------------------------------------------------------------------
+# LangChain tool wrappers
+#
+# @lc_tool generates the JSON schema the LLM reads to decide when
+# and how to call each tool. The docstring is the critical part —
+# it is what the LLM reads as the tool's description.
 # ------------------------------------------------------------------
 
 @lc_tool
 def find_doctor(
-        condition: str | None = None,
-        specialization: str | None = None,
+    condition: str | None = None,
+    specialization: str | None = None,
 ) -> dict:
     """
     Search the healthcare Knowledge Graph to find doctors and specialists.
 
-    Use this tool when the user asks which doctor to see, which specialist
-    treats a condition, or how to find a cardiologist, neurologist, or any
-    other type of specialist.
+    Use when the user asks which doctor to see, which specialist treats
+    a condition, or how to find a cardiologist, neurologist, etc.
 
     Provide EITHER:
-      - condition: a medical condition e.g. 'Hypertension', 'Migraine',
-        'Knee Pain', 'Diabetes'
-      - specialization: a medical specialty e.g. 'Cardiology', 'Neurology',
-        'Orthopedics', 'General Medicine'
+      condition:      a medical condition e.g. 'Hypertension', 'Migraine'
+      specialization: a medical specialty e.g. 'Cardiology', 'Neurology'
 
-    Do NOT provide both. If both are given, condition takes precedence.
-
-    Returns a list of matching doctors with their hospital and experience.
+    Do NOT provide both. If both given, condition takes precedence.
     """
     return _find_doctor(condition=condition, specialization=specialization)
 
@@ -98,14 +211,11 @@ def find_doctor(
 @lc_tool
 def get_appointment(appointment_id: str) -> dict:
     """
-    Look up an appointment by its unique appointment ID.
+    Look up an appointment by its unique ID (e.g. 'AP101', 'AP102').
 
-    Use this when the user mentions an appointment ID (e.g. 'AP101', 'AP102')
-    and wants to know the status, doctor name, date, time, or any other
-    appointment details. The ID is case-insensitive.
-
-    Returns appointment details including patient name, doctor, date, time,
-    status (confirmed/pending/cancelled), and any notes.
+    Use when the user provides an appointment ID and wants to know
+    the status, doctor name, date, time, or any appointment details.
+    The ID is case-insensitive.
     """
     return _get_appointment(appointment_id=appointment_id)
 
@@ -113,29 +223,30 @@ def get_appointment(appointment_id: str) -> dict:
 @lc_tool
 def calculate_bmi(weight_kg: float, height_cm: float) -> dict:
     """
-    Calculate Body Mass Index (BMI) given weight and height.
+    Calculate Body Mass Index (BMI) given weight in kg and height in cm.
 
-    Use this when the user provides their weight in kilograms and height
-    in centimetres and asks about BMI, weight category, or whether they
-    are underweight, overweight, or obese.
+    Use when the user provides weight and height and asks about BMI,
+    their weight category, or whether they are overweight/underweight.
 
-    Returns BMI value (rounded to 2 decimal places), WHO weight category,
-    and brief general advice. This is NOT a medical diagnosis.
+    Returns BMI value, WHO weight category, and brief general advice.
+    This is NOT a medical diagnosis.
     """
     return _calculate_bmi(weight_kg=weight_kg, height_cm=height_cm)
 
 
 # ------------------------------------------------------------------
-# Registered tool list — explicit allowlist
+# Tool registry — explicit execution allowlist
 #
 # Only tools in this list can be called by the agent.
-# Adding a function here makes it callable; removing it from this
-# list makes it unreachable even if the LLM tries to invoke it.
+# If the LLM hallucinates a tool name not in this list, ToolNode
+# returns an error ToolMessage — the LLM sees it and reports to the
+# user. No exception is raised.
 #
 # NOTE: This is an execution allowlist, not an authentication or
-# authorization boundary. It does not replace access control.
+# authorization boundary.
 # ------------------------------------------------------------------
 REGISTERED_TOOLS = [find_doctor, get_appointment, calculate_bmi]
+
 
 # ------------------------------------------------------------------
 # Graph State
@@ -143,21 +254,20 @@ REGISTERED_TOOLS = [find_doctor, get_appointment, calculate_bmi]
 
 class AgentState(TypedDict):
     """
-    The full state passed between LangGraph nodes.
+    State passed between LangGraph nodes on every step.
 
-    Fields:
-        messages:     Full conversation history. The add_messages
-                      reducer appends new messages rather than replacing
-                      the list, preserving the complete history.
-        tools_used:   Ordered list of {tool, args} dicts for
-                      observability — returned in the API response.
-        total_turns:  Number of agent→tool→agent round-trips completed.
-        request_id:   UUID assigned per /chat request for log correlation.
-        error:        Set to a message string if a graph-level error occurs
-                      (e.g. LLM unavailable). None during normal execution.
+    messages:    Full conversation history. The add_messages reducer
+                 APPENDS new messages rather than replacing the list —
+                 this is how conversation context accumulates correctly
+                 through multiple tool call cycles.
+    total_turns: Number of agent→tool→agent round-trips completed.
+                 Compared against MAX_AGENT_TURNS in should_continue().
+    request_id:  Short UUID assigned per /chat request. Used to
+                 correlate all log lines for a single request.
+    error:       Set by agent_node on LLM failure. should_continue()
+                 routes immediately to END when this is set.
     """
     messages: Annotated[list[BaseMessage], add_messages]
-    tools_used: list[dict[str, Any]]
     total_turns: int
     request_id: str
     error: str | None
@@ -166,15 +276,11 @@ class AgentState(TypedDict):
 # ------------------------------------------------------------------
 # LLM client
 #
-# ChatOpenAI from langchain_openai is used because it integrates
-# directly with LangGraph's ToolNode via bind_tools().
-# The base_url points to OpenRouter, which proxies to GPT-4o-mini.
-#
-# NOTE on timeouts: The underlying httpx client used by ChatOpenAI
-# accepts a timeout parameter. We set request_timeout to 30 seconds.
-# This is a best-effort timeout; network conditions may cause it to
-# be exceeded in practice.
+# ChatOpenAI integrates with LangGraph's ToolNode via bind_tools().
+# base_url points to OpenRouter which proxies to GPT-4o-mini.
+# request_timeout=30 is a best-effort limit on the HTTP call.
 # ------------------------------------------------------------------
+
 def _build_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.llm_model,
@@ -191,23 +297,17 @@ def _build_llm() -> ChatOpenAI:
 
 def agent_node(state: AgentState) -> dict:
     """
-    LLM node: decides whether to call a tool or respond directly.
+    Calls the LLM with the current message history and bound tools.
 
-    Calls the LLM with the full message history and registered tools.
-    The LLM's response is either:
-      - An AIMessage with tool_calls → routed to tool_node
-      - An AIMessage with plain text content → routed to END
+    The LLM responds with either:
+      - AIMessage with tool_calls  → should_continue routes to "tools"
+      - AIMessage with plain text  → should_continue routes to END
 
-    On LLM failure, sets state["error"] and returns a fallback message
-    so the graph routes cleanly to END rather than crashing.
+    On LLM failure: sets state["error"] and returns a safe fallback
+    message so the graph exits cleanly to END rather than crashing.
     """
-    request_id = state.get("request_id", "unknown")
+    request_id = state["request_id"]
     turn = state["total_turns"] + 1
-
-    log.info(
-        "Agent node executing.",
-        extra={"request_id": request_id, "turn": turn},
-    )
 
     llm = _build_llm().bind_tools(REGISTERED_TOOLS)
     t0 = time.monotonic()
@@ -215,26 +315,12 @@ def agent_node(state: AgentState) -> dict:
     try:
         response: AIMessage = llm.invoke(state["messages"])
         latency_ms = int((time.monotonic() - t0) * 1000)
-
-        log.info(
-            "LLM call complete.",
-            extra={
-                "request_id": request_id,
-                "turn": turn,
-                "has_tool_calls": bool(response.tool_calls),
-                "latency_ms": latency_ms,
-            },
-        )
+        log.info(f"[{request_id}] LLM turn {turn} completed in {latency_ms}ms")
         return {"messages": [response]}
 
     except Exception as e:
         latency_ms = int((time.monotonic() - t0) * 1000)
-        log.error(
-            "LLM call failed.",
-            extra={"request_id": request_id, "turn": turn, "error": str(e), "latency_ms": latency_ms},
-        )
-        # Return a safe fallback AIMessage so the graph can route to END.
-        # Do NOT expose the raw exception to the user.
+        log.error(f"[{request_id}] LLM call failed at turn {turn} after {latency_ms}ms — {type(e).__name__}")
         fallback = AIMessage(
             content=(
                 "I'm sorry, I'm unable to process your request right now due to a "
@@ -243,7 +329,7 @@ def agent_node(state: AgentState) -> dict:
         )
         return {
             "messages": [fallback],
-            "error": "LLM call failed. See server logs for details.",
+            "error": f"LLM call failed: {type(e).__name__}",
         }
 
 
@@ -253,35 +339,29 @@ def agent_node(state: AgentState) -> dict:
 
 def should_continue(state: AgentState) -> str:
     """
-    Decide the next node after agent_node runs.
+    Decides the next node after agent_node runs.
 
-    Returns:
-        "tools"  — if the last message has tool_calls and we're under MAX_TURNS
-        END      — if no tool_calls, or MAX_TURNS reached, or an error occurred
+    Returns "tools" if the LLM produced tool calls and we are under
+    the iteration limit. Returns END in all other cases.
+
+    Routing rules (checked in order):
+      1. state["error"] is set        → END  (LLM failure)
+      2. total_turns >= MAX_TURNS     → END  (iteration limit hit)
+      3. last message has tool_calls  → "tools"
+      4. otherwise                    → END  (final answer)
     """
-    # If a graph-level error occurred, stop.
     if state.get("error"):
         return END
 
-    last_message = state["messages"][-1]
-
-    # If the LLM produced tool calls and we haven't hit the turn limit
-    if (
-            isinstance(last_message, AIMessage)
-            and last_message.tool_calls
-            and state["total_turns"] < settings.max_agent_turns
-    ):
-        return "tools"
-
-    # Log if we hit the iteration limit
     if state["total_turns"] >= settings.max_agent_turns:
         log.warning(
-            "Max agent turns reached.",
-            extra={
-                "request_id": state.get("request_id", "unknown"),
-                "max_turns": settings.max_agent_turns,
-            },
+            f"[{state['request_id']}] Max agent turns ({settings.max_agent_turns}) reached"
         )
+        return END
+
+    last_message = state["messages"][-1]
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
 
     return END
 
@@ -289,69 +369,37 @@ def should_continue(state: AgentState) -> str:
 # ------------------------------------------------------------------
 # Node: Tool execution
 #
-# LangGraph's built-in ToolNode handles:
-#   - Reading tool_calls from the last AIMessage
-#   - Calling each registered tool by name
-#   - Catching errors per-tool and returning them as ToolMessages
-#   - Appending ToolMessages to state.messages
+# LangGraph's built-in ToolNode:
+#   - Reads tool_calls from the last AIMessage
+#   - Looks up each tool by name in REGISTERED_TOOLS
+#   - Calls it with the provided arguments
+#   - Formats the return value as a ToolMessage
+#   - Appends ToolMessages to state.messages
 #
-# Unknown tool names produce a ToolMessage with an error string,
-# which the LLM sees and reports to the user.
-# ------------------------------------------------------------------
-tool_node = ToolNode(REGISTERED_TOOLS)
-
-
-# ------------------------------------------------------------------
-# Tool tracking middleware
-#
-# LangGraph's ToolNode does not expose a hook to record which tools
-# were called. We wrap the node to extract this from the messages.
+# We add one wrapper layer solely to log which tool is executing.
 # ------------------------------------------------------------------
 
-def tool_node_with_tracking(state: AgentState) -> dict:
+_tool_node = ToolNode(REGISTERED_TOOLS)
+
+
+def tool_node(state: AgentState) -> dict:
     """
-    Execute tools via LangGraph's ToolNode and record what was called.
+    Logs tool execution then delegates to LangGraph's ToolNode.
 
-    Reads tool_calls from the last AIMessage, updates tools_used in
-    state, then delegates to ToolNode for actual execution.
+    The only reason this wrapper exists is to log the tool name
+    and increment total_turns. ToolNode handles all execution logic.
     """
+    request_id = state["request_id"]
     last_message = state["messages"][-1]
-    new_tools_used = list(state.get("tools_used", []))
 
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
         for tc in last_message.tool_calls:
-            tool_name = tc["name"]
-            tool_args = tc["args"]
+            log.info(f"[{request_id}] Executing tool: {tc['name']} | args: {tc['args']}")
 
-            log.info(
-                "Tool executing.",
-                extra={
-                    "request_id": state.get("request_id", "unknown"),
-                    "tool": tool_name,
-                    "tool_args": tool_args,
-                    "turn": state["total_turns"] + 1,
-                },
-            )
-            new_tools_used.append({"tool": tool_name, "args": tool_args})
-
-    # Execute tools via ToolNode
-    tool_result = tool_node.invoke(state)
-
-    # Log tool results
-    for msg in tool_result.get("messages", []):
-        if isinstance(msg, ToolMessage):
-            log.info(
-                "Tool complete.",
-                extra={
-                    "request_id": state.get("request_id", "unknown"),
-                    "tool_call_id": msg.tool_call_id,
-                    "content_preview": str(msg.content)[:120],
-                },
-            )
+    result = _tool_node.invoke(state)
 
     return {
-        **tool_result,
-        "tools_used": new_tools_used,
+        **result,
         "total_turns": state["total_turns"] + 1,
     }
 
@@ -361,11 +409,10 @@ def tool_node_with_tracking(state: AgentState) -> dict:
 # ------------------------------------------------------------------
 
 def _build_graph() -> Any:
-    """Build and compile the LangGraph StateGraph."""
     graph = StateGraph(AgentState)
 
     graph.add_node("agent", agent_node)
-    graph.add_node("tools", tool_node_with_tracking)
+    graph.add_node("tools", tool_node)
 
     graph.set_entry_point("agent")
 
@@ -375,13 +422,13 @@ def _build_graph() -> Any:
         {"tools": "tools", END: END},
     )
 
-    # After tool execution, always return to the agent node
+    # After tool execution always return to the agent node
     graph.add_edge("tools", "agent")
 
     return graph.compile()
 
 
-# Compiled graph — built once at module load, reused per request
+# Compiled once at module load — reused for every request
 _graph = _build_graph()
 
 
@@ -391,76 +438,65 @@ _graph = _build_graph()
 
 def run_agent(user_message: str) -> dict:
     """
-    Run the LangGraph agent for a single user message.
+    Entry point called by the FastAPI /chat endpoint.
 
-    Initialises a fresh AgentState for each request (stateless — no
-    memory across requests). The graph runs until the LLM produces
-    a final answer or MAX_TURNS is reached.
-
-    Args:
-        user_message: Raw natural-language query from the user.
+    Flow:
+      1. Assign a request_id for log correlation
+      2. Run check_input_scope() — reject out-of-scope requests immediately
+      3. Invoke the LangGraph graph with initial state
+      4. Extract and return the final answer
 
     Returns:
-        dict with keys:
-            answer      — LLM's final response string
-            tools_used  — list of {tool, args} dicts
-            total_turns — number of tool round-trips
+        answer:      LLM's final response string
+        total_turns: number of tool round-trips that occurred
     """
     request_id = str(uuid.uuid4())[:8]
-
-    log.info(
-        "Agent run started.",
-        extra={"request_id": request_id, "message_preview": user_message[:80]},
-    )
     t0 = time.monotonic()
 
+    log.info(f"[{request_id}] Request received")
+
+    # -- Guardrail: scope check before touching the graph --
+    rejection = check_input_scope(user_message)
+    if rejection:
+        log.info(f"[{request_id}] Request rejected by input guardrail")
+        return {"answer": rejection, "total_turns": 0}
+
+    # -- Build initial state --
     initial_state: AgentState = {
         "messages": [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(content=user_message),
         ],
-        "tools_used": [],
         "total_turns": 0,
         "request_id": request_id,
         "error": None,
     }
 
+    # -- Run the graph --
     final_state = _graph.invoke(initial_state)
 
-    latency_ms = int((time.monotonic() - t0) * 1000)
-
-    # Extract final answer from the last AIMessage in history
-    answer = _extract_final_answer(final_state)
-
+    total_ms = int((time.monotonic() - t0) * 1000)
     log.info(
-        "Agent run complete.",
-        extra={
-            "request_id": request_id,
-            "total_turns": final_state["total_turns"],
-            "tools_used": [t["tool"] for t in final_state["tools_used"]],
-            "latency_ms": latency_ms,
-        },
+        f"[{request_id}] Request complete | "
+        f"turns={final_state['total_turns']} | "
+        f"total_latency={total_ms}ms"
     )
 
     return {
-        "answer": answer,
-        "tools_used": final_state["tools_used"],
+        "answer": _extract_final_answer(final_state),
         "total_turns": final_state["total_turns"],
     }
 
 
 def _extract_final_answer(state: AgentState) -> str:
     """
-    Extract the last AIMessage content from state as the final answer.
-
-    Searches backward through messages for the last AIMessage
-    that has text content (not just tool calls).
+    Walk backwards through messages to find the last AIMessage with content.
+    This is the LLM's final synthesised response.
     """
     for message in reversed(state["messages"]):
         if isinstance(message, AIMessage) and message.content:
             return str(message.content)
 
-    # Fallback — should not occur in normal operation
     if state.get("error"):
         return (
             "I'm sorry, I encountered an issue processing your request. "

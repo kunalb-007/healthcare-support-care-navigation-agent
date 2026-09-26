@@ -1,33 +1,44 @@
 """
-Configures application-wide logging with a consistent format,
-including optional contextual fields through the extra parameter.
+app/logger.py
+-------------
+Application-wide logging setup.
+
+Provides consistent log formatting across all modules.
+Each module calls get_logger(__name__) to get a named logger.
+
+What we log:
+  - Request start/end with request_id and total latency
+  - LLM call latency per turn
+  - Tool name being executed
+  - Errors and exceptions (sanitized — no secrets or internal paths)
+
+What we do NOT log:
+  - API keys or passwords
+  - Patient names or health data from requests
+  - Raw exception tracebacks sent to users
 """
 
 import logging
 import sys
-from app.config import settings
 
+from app.config import settings
 
 _CONFIGURED = False
 
 
 def _configure_logging() -> None:
-    """Configure the root logger once at import time."""
     global _CONFIGURED
     if _CONFIGURED:
         return
 
     numeric_level = getattr(logging, settings.log_level, logging.INFO)
-
     fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-    datefmt = "%Y-%m-%dT%H:%M:%S"
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+    handler.setFormatter(logging.Formatter(fmt=fmt, datefmt="%Y-%m-%dT%H:%M:%S"))
 
     root = logging.getLogger()
     root.setLevel(numeric_level)
-    # Avoid adding duplicate handlers if the function is called more than once
     if not root.handlers:
         root.addHandler(handler)
 
@@ -43,13 +54,4 @@ _configure_logging()
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Return a named logger.
-
-    Args:
-        name: Typically __name__ of the calling module.
-
-    Returns:
-        logging.Logger configured by the root setup above.
-    """
     return logging.getLogger(name)
