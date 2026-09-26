@@ -14,7 +14,7 @@ from unittest.mock import patch, MagicMock
 # Must be set before any app module is imported so the Settings singleton
 # picks them up. Using os.environ directly (not setdefault) so they
 # override anything already present in the environment.
-os.environ["OPENROUTER_API_KEY"] = "test-key-for-unit-tests"
+os.environ["GROQ_API_KEY"] = "test-key-for-unit-tests"
 os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000"
 
 from app.main import app  # noqa: E402  (import after env setup)
@@ -39,13 +39,13 @@ def client():
 
 def _mock_agent_result(
         answer="Test answer.",
-        tools_used=None,
         total_turns=0,
+        tools_used=None,
 ):
     return {
         "answer": answer,
-        "tools_used": tools_used or [],
         "total_turns": total_turns,
+        "tools_used": tools_used or [],
     }
 
 
@@ -65,7 +65,6 @@ class TestChatEndpoint:
             response = client.post("/chat", json={"message": "Hello"})
         data = response.json()
         assert "answer" in data
-        assert "tools_used" in data
         assert "total_turns" in data
 
     def test_answer_content_matches_agent_output(self, client):
@@ -78,8 +77,6 @@ class TestChatEndpoint:
         with patch("app.main.run_agent", return_value=_mock_agent_result(tools_used=tools, total_turns=1)):
             response = client.post("/chat", json={"message": "My BMI?"})
         data = response.json()
-        assert len(data["tools_used"]) == 1
-        assert data["tools_used"][0]["tool"] == "calculate_bmi"
         assert data["total_turns"] == 1
 
     def test_empty_message_returns_422(self, client):

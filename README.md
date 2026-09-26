@@ -47,7 +47,7 @@ User Request (POST /chat)
         │
         ▼
    FastAPI Response
-   { answer, tools_used, total_turns }
+   { answer, total_turns }
 ```
 
 ### LangGraph Nodes

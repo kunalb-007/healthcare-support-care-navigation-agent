@@ -277,15 +277,15 @@ class AgentState(TypedDict):
 # LLM client
 #
 # ChatOpenAI integrates with LangGraph's ToolNode via bind_tools().
-# base_url points to OpenRouter which proxies to GPT-4o-mini.
+# base_url points to GROQ which proxies to GPT-4o-mini.
 # request_timeout=30 is a best-effort limit on the HTTP call.
 # ------------------------------------------------------------------
 
 def _build_llm() -> ChatOpenAI:
     return ChatOpenAI(
         model=settings.llm_model,
-        openai_api_key=settings.openrouter_api_key,
-        openai_api_base=settings.openrouter_base_url,
+        openai_api_key=settings.groq_api_key,
+        openai_api_base=settings.groq_base_url,
         request_timeout=30,
         temperature=0,
     )

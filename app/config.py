@@ -23,9 +23,9 @@ class Settings:
     # ------------------------------------------------------------------
     # LLM
     # ------------------------------------------------------------------
-    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "openai/gpt-4o-mini"
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    llm_model: str = "openai/gpt-oss-120b"
 
     # ------------------------------------------------------------------
     # Neo4j
@@ -62,9 +62,9 @@ class Settings:
         Called at application startup so the service fails fast
         rather than on the first request.
         """
-        if not self.openrouter_api_key:
+        if not self.groq_api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY is not set. "
+                "GROQ_API_KEY is not set. "
                 "Copy .env.example to .env and add your API key."
             )
         if not self.neo4j_password or self.neo4j_password == "password":
