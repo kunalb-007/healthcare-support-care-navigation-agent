@@ -4,6 +4,10 @@ An **agentic AI healthcare navigation prototype** built with **LangGraph, LLM to
 
 The agent accepts natural-language healthcare queries, autonomously selects the appropriate tool, executes it, and synthesizes the final response.
 
+
+📖 **Swagger API Docs:**   
+https://healthcare-support-care-navigation-agent.onrender.com/docs
+
 ---
 
 ## What It Does
