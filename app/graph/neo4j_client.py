@@ -48,7 +48,8 @@ class Neo4jClient:
             self._driver.verify_connectivity()
             return True
         except Exception as e:
-            log.warning("Neo4j connectivity check failed.", extra={"error": str(e)})
+#             log.warning("Neo4j connectivity check failed.", extra={"error": str(e)})
+            log.exception("Neo4j connectivity check failed: %s", e)
             return False
 
     # ------------------------------------------------------------------

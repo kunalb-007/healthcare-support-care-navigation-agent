@@ -449,6 +449,7 @@ def run_agent(user_message: str) -> dict:
     Returns:
         answer:      LLM's final response string
         total_turns: number of tool round-trips that occurred
+        tools_used:  list of {name, args} dicts for every tool call made
     """
     request_id = str(uuid.uuid4())[:8]
     t0 = time.monotonic()
@@ -459,7 +460,7 @@ def run_agent(user_message: str) -> dict:
     rejection = check_input_scope(user_message)
     if rejection:
         log.info(f"[{request_id}] Request rejected by input guardrail")
-        return {"answer": rejection, "total_turns": 0}
+        return {"answer": rejection, "total_turns": 0, "tools_used": []}
 
     # -- Build initial state --
     initial_state: AgentState = {
@@ -485,6 +486,7 @@ def run_agent(user_message: str) -> dict:
     return {
         "answer": _extract_final_answer(final_state),
         "total_turns": final_state["total_turns"],
+        "tools_used": _extract_tools_used(final_state),
     }
 
 
@@ -503,3 +505,17 @@ def _extract_final_answer(state: AgentState) -> str:
             "Please try again."
         )
     return "I was unable to generate a response. Please try rephrasing your query."
+
+
+def _extract_tools_used(state: AgentState) -> list[dict]:
+    """
+    Walk all messages and collect every tool call the LLM made.
+    Returns a list of {name, args} dicts, in invocation order.
+    Used by evals and optionally surfaced in the API response.
+    """
+    tools_used = []
+    for message in state["messages"]:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            for tc in message.tool_calls:
+                tools_used.append({"name": tc["name"], "args": tc["args"]})
+    return tools_used

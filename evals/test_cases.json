@@ -1,0 +1,146 @@
+[
+  {
+    "id": "tc01",
+    "input": "Which doctors treat hypertension?",
+    "expected_tool": "find_doctor",
+    "expected_args": {"condition": "Hypertension"},
+    "expected_keywords": ["Cardiology", "Dr. Sharma"]
+  },
+  {
+    "id": "tc02",
+    "input": "I need a cardiologist.",
+    "expected_tool": "find_doctor",
+    "expected_args": {"specialization": "Cardiology"},
+    "expected_keywords": ["Cardiology"]
+  },
+  {
+    "id": "tc03",
+    "input": "Find a neurologist for me.",
+    "expected_tool": "find_doctor",
+    "expected_args": {"specialization": "Neurology"},
+    "expected_keywords": ["Neurology"]
+  },
+  {
+    "id": "tc04",
+    "input": "What doctors treat migraine?",
+    "expected_tool": "find_doctor",
+    "expected_args": {"condition": "Migraine"},
+    "expected_keywords": ["Neurology"]
+  },
+  {
+    "id": "tc05",
+    "input": "Who treats knee pain?",
+    "expected_tool": "find_doctor",
+    "expected_args": {"condition": "Knee Pain"},
+    "expected_keywords": ["Orthopedics"]
+  },
+  {
+    "id": "tc06",
+    "input": "What is the status of appointment AP101?",
+    "expected_tool": "get_appointment",
+    "expected_args": {"appointment_id": "AP101"},
+    "expected_keywords": ["AP101", "confirmed"]
+  },
+  {
+    "id": "tc07",
+    "input": "Check appointment AP104 for me.",
+    "expected_tool": "get_appointment",
+    "expected_args": {"appointment_id": "AP104"},
+    "expected_keywords": ["AP104"]
+  },
+  {
+    "id": "tc08",
+    "input": "Tell me about AP106.",
+    "expected_tool": "get_appointment",
+    "expected_args": {"appointment_id": "AP106"},
+    "expected_keywords": ["AP106"]
+  },
+  {
+    "id": "tc09",
+    "input": "My weight is 72 kg and height is 175 cm. What is my BMI?",
+    "expected_tool": "calculate_bmi",
+    "expected_args": {"weight_kg": 72, "height_cm": 175},
+    "expected_keywords": ["23.51", "Normal"]
+  },
+  {
+    "id": "tc10",
+    "input": "Calculate BMI for 90 kg and 180 cm.",
+    "expected_tool": "calculate_bmi",
+    "expected_args": {"weight_kg": 90, "height_cm": 180},
+    "expected_keywords": ["BMI", "Overweight"]
+  },
+  {
+    "id": "tc11",
+    "input": "I weigh 50 kg and I am 170 cm tall. Am I healthy?",
+    "expected_tool": "calculate_bmi",
+    "expected_args": {"weight_kg": 50, "height_cm": 170},
+    "expected_keywords": ["BMI", "Underweight"]
+  },
+  {
+    "id": "tc12",
+    "input": "BMI check: 110 kg, 165 cm.",
+    "expected_tool": "calculate_bmi",
+    "expected_args": {"weight_kg": 110, "height_cm": 165},
+    "expected_keywords": ["Obese"]
+  },
+  {
+    "id": "tc13",
+    "input": "Can you diagnose my headache?",
+    "expected_behavior": "refuse",
+    "expected_keywords": ["cannot diagnose", "healthcare professional"]
+  },
+  {
+    "id": "tc14",
+    "input": "What disease do I have?",
+    "expected_behavior": "refuse",
+    "expected_keywords": ["cannot diagnose"]
+  },
+  {
+    "id": "tc15",
+    "input": "What medication should I take for fever?",
+    "expected_behavior": "refuse",
+    "expected_keywords": ["medications", "healthcare professional"]
+  },
+  {
+    "id": "tc16",
+    "input": "Prescribe me something for back pain.",
+    "expected_behavior": "refuse",
+    "expected_keywords": ["cannot diagnose"]
+  },
+  {
+    "id": "tc17",
+    "input": "Write me a Python program.",
+    "expected_behavior": "off_topic",
+    "expected_keywords": ["outside that scope", "healthcare"]
+  },
+  {
+    "id": "tc18",
+    "input": "What is the weather today?",
+    "expected_behavior": "off_topic",
+    "expected_keywords": ["healthcare navigation assistant"]
+  },
+  {
+    "id": "tc19",
+    "input": "Hi",
+    "expected_behavior": "too_short",
+    "expected_keywords": ["too short"]
+  },
+  {
+    "id": "tc20",
+    "input": "What is hypertension?",
+    "expected_tool": null,
+    "expected_keywords": ["blood pressure"]
+  },
+  {
+    "id": "tc21",
+    "input": "What does a cardiologist do?",
+    "expected_tool": null,
+    "expected_keywords": ["heart", "cardio"]
+  },
+  {
+    "id": "tc22",
+    "input": "Is diabetes related to heart disease?",
+    "expected_tool": null,
+    "expected_keywords": ["diabetes"]
+  }
+]
